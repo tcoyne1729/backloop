@@ -1,0 +1,2 @@
+# backloop
+Simple backtesting framework
