@@ -273,6 +273,26 @@ class Backtester:
         avg_dd = float(below.mean()) if len(below) > 0 else 0.0
         current_dd = float(dd_series[-1]) if len(dd_series) > 0 else 0.0
 
+        dd_periods = self._drawdown_periods(dd_series)
+        completed = [p for p in dd_periods if p["recovery"] is not None]
+        avg_dd_duration = (
+            float(np.mean([p["duration"] for p in dd_periods]))
+            if dd_periods
+            else np.nan
+        )
+        avg_recovery = (
+            float(np.mean([p["recovery"] for p in completed])) if completed else np.nan
+        )
+
+        # ---- Annual returns ----
+        equity_series = pd.Series(self.equity_curve, index=self.data.index)
+        annual_prices = equity_series.resample("YE").last()
+        annual_returns: dict[int, float] = {}
+        prev = initial
+        for dt, val in annual_prices.items():
+            annual_returns[dt.year] = float(val / prev - 1.0)
+            prev = float(val)
+
         # ---- Trade metrics ----
         round_trips = self._round_trips()
         profits = [rt["profit"] for rt in round_trips]
@@ -294,10 +314,18 @@ class Backtester:
             "Max Drawdown Duration (days)": max_dd_duration,
             "Average Drawdown": avg_dd,
             "Current Drawdown": current_dd,
+            "Drawdown Periods": len(dd_periods),
+            "Avg Drawdown Duration (days)": avg_dd_duration,
+            "Avg Recovery Time (days)": avg_recovery,
+            # Regime
+            "Annual Returns": annual_returns,
             # Trades
             "Num Trades": len(self.trades),
             "Avg Holding Period (days)": (
                 float(np.mean(holding_days)) if holding_days else np.nan
+            ),
+            "Median Holding Period (days)": (
+                float(np.median(holding_days)) if holding_days else np.nan
             ),
             "Avg Profit per Trade": float(np.mean(profits)) if profits else np.nan,
             "Win Rate": len(wins) / len(profits) if profits else np.nan,
@@ -342,6 +370,40 @@ class Backtester:
             else:
                 cur_dur = 0
         return max_dur
+
+    @staticmethod
+    def _drawdown_periods(dd_series: np.ndarray) -> list[dict]:
+        """Return metadata for every distinct drawdown period.
+
+        Args:
+            dd_series: Drawdown fraction array from :meth:`_drawdown_series`.
+
+        Returns:
+            List of dicts with keys ``duration`` (bars underwater) and
+            ``recovery`` (bars from trough back to peak, or ``None`` if the
+            period is still open at the end of the series).
+
+        """
+        periods: list[dict] = []
+        in_dd = False
+        start = trough_i = 0
+        trough_val = 0.0
+        for i, d in enumerate(dd_series):
+            if not in_dd and d < 0:
+                in_dd = True
+                start = i
+                trough_i = i
+                trough_val = d
+            elif in_dd:
+                if d < trough_val:
+                    trough_i = i
+                    trough_val = d
+                if d >= 0:
+                    periods.append({"duration": i - start, "recovery": i - trough_i})
+                    in_dd = False
+        if in_dd:
+            periods.append({"duration": len(dd_series) - start, "recovery": None})
+        return periods
 
     def _round_trips(self) -> list[dict]:
         """Reconstruct FIFO round-trip trades from the rebalancing event log.
